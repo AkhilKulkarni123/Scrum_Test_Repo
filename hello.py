@@ -18,6 +18,7 @@ import pygame.key
 import pygame.mouse
 import pygame.display
 import pygame.font
+import pygame.draw
 import numpy as np
 import ctypes
 import math
