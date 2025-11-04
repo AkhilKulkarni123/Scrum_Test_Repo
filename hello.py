@@ -1,670 +1,393 @@
-#!/usr/bin/env python3
 """
-Interactive ASCII Particle Animation System
-A terminal-based animation engine with multiple scenes, particle effects, and user controls.
-
-Controls:
-- Arrow keys: Move cursor/camera
-- Space: Spawn particles at cursor
-- 1-5: Switch scenes
-- +/-: Adjust particle spawn rate
-- P: Pause/unpause
-- R: Reset scene
-- Q: Quit
-
-Scenes:
-1. Particle fountain with gravity
-2. Fireworks display
-3. Matrix-style rain
-4. Spiral galaxy simulation
-5. Conway's Game of Life with particles
+Interactive Particle-Based Fluid Simulation with SPH (Smoothed Particle Hydrodynamics)
+Features: Real-time physics, color gradients, interactive spawning, gravity control
+Requirements: pip install pygame numpy
 """
 
-import sys
-import os
-import time
-import random
+import pygame
+import numpy as np
 import math
-from collections import deque
+import random
 from dataclasses import dataclass
 from typing import List, Tuple
-import termios
-import tty
-import select
 
-# ============================================================================
-# UTILITY CLASSES AND FUNCTIONS
-# ============================================================================
+# Constants
+WIDTH, HEIGHT = 1200, 800
+FPS = 60
+PARTICLE_RADIUS = 4
+MAX_PARTICLES = 1500
+SPAWN_RATE = 15
 
-@dataclass
-class Vec2:
-    """2D vector for position and velocity"""
-    x: float
-    y: float
-    
-    def __add__(self, other):
-        return Vec2(self.x + other.x, self.y + other.y)
-    
-    def __sub__(self, other):
-        return Vec2(self.x - other.x, self.y - other.y)
-    
-    def __mul__(self, scalar):
-        return Vec2(self.x * scalar, self.y * scalar)
-    
-    def length(self):
-        return math.sqrt(self.x**2 + self.y**2)
-    
-    def normalize(self):
-        l = self.length()
-        if l > 0:
-            return Vec2(self.x / l, self.y / l)
-        return Vec2(0, 0)
+# Physics constants
+SMOOTHING_RADIUS = 30.0
+TARGET_DENSITY = 0.5
+PRESSURE_MULTIPLIER = 50.0
+GRAVITY = 500.0
+DAMPING = 0.98
+VISCOSITY = 0.1
+COLLISION_DAMPING = 0.5
+
+# Color scheme
+BACKGROUND = (10, 10, 25)
+PARTICLE_COLORS = [
+    (100, 150, 255),
+    (120, 180, 255),
+    (80, 200, 255),
+    (60, 220, 255),
+]
 
 @dataclass
 class Particle:
-    """Individual particle with physics"""
-    pos: Vec2
-    vel: Vec2
-    age: int = 0
-    lifetime: int = 50
-    char: str = '*'
-    color: int = 37  # ANSI color code
+    """Represents a single fluid particle with position, velocity, and properties"""
+    x: float
+    y: float
+    vx: float = 0.0
+    vy: float = 0.0
+    density: float = 0.0
+    pressure: float = 0.0
+    color_idx: int = 0
     
-    def update(self, gravity: Vec2 = Vec2(0, 0.1), drag: float = 0.99):
-        self.vel = self.vel + gravity
-        self.vel = self.vel * drag
-        self.pos = self.pos + self.vel
-        self.age += 1
+    def update_position(self, dt: float):
+        """Update particle position based on velocity"""
+        self.x += self.vx * dt
+        self.y += self.vy * dt
     
-    def is_alive(self):
-        return self.age < self.lifetime
+    def apply_force(self, fx: float, fy: float, dt: float):
+        """Apply force to particle (F = ma, assuming mass = 1)"""
+        self.vx += fx * dt
+        self.vy += fy * dt
 
-class Screen:
-    """Terminal screen buffer"""
-    def __init__(self, width: int, height: int):
-        self.width = width
-        self.height = height
-        self.buffer = [[' ' for _ in range(width)] for _ in range(height)]
-        self.color_buffer = [[37 for _ in range(width)] for _ in range(height)]
+class SpatialHash:
+    """Spatial hash grid for efficient neighbor finding"""
+    def __init__(self, cell_size: float, width: int, height: int):
+        self.cell_size = cell_size
+        self.cols = int(width / cell_size) + 1
+        self.rows = int(height / cell_size) + 1
+        self.grid = {}
     
     def clear(self):
-        self.buffer = [[' ' for _ in range(self.width)] for _ in range(self.height)]
-        self.color_buffer = [[37 for _ in range(self.width)] for _ in range(self.height)]
+        """Clear the spatial hash grid"""
+        self.grid.clear()
     
-    def set_pixel(self, x: int, y: int, char: str, color: int = 37):
-        if 0 <= x < self.width and 0 <= y < self.height:
-            self.buffer[y][x] = char
-            self.color_buffer[y][x] = color
+    def hash_pos(self, x: float, y: float) -> Tuple[int, int]:
+        """Convert world position to grid cell"""
+        col = int(x / self.cell_size)
+        row = int(y / self.cell_size)
+        return (col, row)
     
-    def draw_text(self, x: int, y: int, text: str, color: int = 37):
-        for i, char in enumerate(text):
-            self.set_pixel(x + i, y, char, color)
+    def insert(self, particle: Particle, index: int):
+        """Insert particle into spatial hash"""
+        cell = self.hash_pos(particle.x, particle.y)
+        if cell not in self.grid:
+            self.grid[cell] = []
+        self.grid[cell].append(index)
     
-    def render(self):
-        # Move cursor to top-left
-        sys.stdout.write('\033[H')
+    def get_nearby(self, x: float, y: float) -> List[int]:
+        """Get all particle indices near a position"""
+        nearby = []
+        cell = self.hash_pos(x, y)
         
-        for y in range(self.height):
-            line_parts = []
-            current_color = None
-            
-            for x in range(self.width):
-                color = self.color_buffer[y][x]
-                char = self.buffer[y][x]
-                
-                if color != current_color:
-                    if current_color is not None:
-                        line_parts.append('\033[0m')  # Reset
-                    line_parts.append(f'\033[{color}m')
-                    current_color = color
-                
-                line_parts.append(char)
-            
-            if current_color is not None:
-                line_parts.append('\033[0m')
-            
-            sys.stdout.write(''.join(line_parts) + '\n')
+        # Check 3x3 grid of cells
+        for dx in [-1, 0, 1]:
+            for dy in [-1, 0, 1]:
+                check_cell = (cell[0] + dx, cell[1] + dy)
+                if check_cell in self.grid:
+                    nearby.extend(self.grid[check_cell])
         
-        sys.stdout.flush()
+        return nearby
 
-class InputHandler:
-    """Non-blocking keyboard input handler"""
-    def __init__(self):
-        self.old_settings = None
-    
-    def __enter__(self):
-        self.old_settings = termios.tcgetattr(sys.stdin)
-        tty.setcbreak(sys.stdin.fileno())
-        return self
-    
-    def __exit__(self, type, value, traceback):
-        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
-    
-    def get_key(self, timeout=0.001):
-        if select.select([sys.stdin], [], [], timeout)[0]:
-            key = sys.stdin.read(1)
-            # Handle arrow keys
-            if key == '\x1b':
-                next1 = sys.stdin.read(1)
-                next2 = sys.stdin.read(1)
-                if next1 == '[':
-                    return {'A': 'UP', 'B': 'DOWN', 'C': 'RIGHT', 'D': 'LEFT'}.get(next2, None)
-            return key
-        return None
-
-# ============================================================================
-# SCENE IMPLEMENTATIONS
-# ============================================================================
-
-class ParticleFountain:
-    """Scene 1: Particle fountain with gravity"""
+class FluidSimulation:
+    """Main fluid simulation using SPH method"""
     def __init__(self, width: int, height: int):
         self.width = width
         self.height = height
         self.particles: List[Particle] = []
-        self.cursor = Vec2(width // 2, height // 2)
-        self.spawn_rate = 5
-        self.frame = 0
-    
-    def update(self):
-        # Spawn new particles from cursor
-        if self.frame % (max(1, 10 - self.spawn_rate)) == 0:
-            for _ in range(random.randint(1, 3)):
-                angle = random.uniform(-math.pi/3, -2*math.pi/3)
-                speed = random.uniform(1, 2.5)
-                vel = Vec2(math.cos(angle) * speed, math.sin(angle) * speed)
-                
-                colors = [31, 33, 36, 35, 34]  # Red, yellow, cyan, magenta, blue
-                self.particles.append(Particle(
-                    pos=Vec2(self.cursor.x, self.cursor.y),
-                    vel=vel,
-                    lifetime=random.randint(30, 60),
-                    char=random.choice(['*', '•', '○', '·']),
-                    color=random.choice(colors)
-                ))
-        
-        # Update particles
-        for p in self.particles:
-            p.update(gravity=Vec2(0, 0.15), drag=0.98)
-        
-        # Remove dead particles
-        self.particles = [p for p in self.particles if p.is_alive()]
-        self.frame += 1
-    
-    def render(self, screen: Screen):
-        screen.clear()
-        
-        # Draw particles
-        for p in self.particles:
-            alpha = 1.0 - (p.age / p.lifetime)
-            if alpha > 0.7:
-                char = p.char
-            elif alpha > 0.4:
-                char = '·'
-            else:
-                char = '.'
-            
-            screen.set_pixel(int(p.pos.x), int(p.pos.y), char, p.color)
-        
-        # Draw cursor
-        screen.set_pixel(int(self.cursor.x), int(self.cursor.y), '+', 32)
-        
-        # Draw info
-        screen.draw_text(2, 1, "PARTICLE FOUNTAIN", 36)
-        screen.draw_text(2, 2, f"Particles: {len(self.particles)}", 37)
-        screen.draw_text(2, 3, f"Spawn rate: {self.spawn_rate}", 37)
-
-class Fireworks:
-    """Scene 2: Fireworks display"""
-    def __init__(self, width: int, height: int):
-        self.width = width
-        self.height = height
-        self.particles: List[Particle] = []
-        self.rockets: List[Particle] = []
-        self.frame = 0
-        self.spawn_rate = 5
-    
-    def spawn_rocket(self):
-        x = random.randint(10, self.width - 10)
-        rocket = Particle(
-            pos=Vec2(x, self.height - 2),
-            vel=Vec2(random.uniform(-0.2, 0.2), random.uniform(-3, -4)),
-            lifetime=random.randint(20, 35),
-            char='|',
-            color=33
-        )
-        self.rockets.append(rocket)
-    
-    def explode(self, pos: Vec2):
-        num_particles = random.randint(20, 40)
-        colors = [31, 33, 32, 36, 35, 34]
-        color = random.choice(colors)
-        
-        for _ in range(num_particles):
-            angle = random.uniform(0, 2 * math.pi)
-            speed = random.uniform(0.5, 2.5)
-            vel = Vec2(math.cos(angle) * speed, math.sin(angle) * speed)
-            
-            self.particles.append(Particle(
-                pos=Vec2(pos.x, pos.y),
-                vel=vel,
-                lifetime=random.randint(15, 35),
-                char=random.choice(['*', '•', '○', '+']),
-                color=color
-            ))
-    
-    def update(self):
-        # Spawn rockets
-        if self.frame % (max(1, 30 - self.spawn_rate * 3)) == 0:
-            self.spawn_rocket()
-        
-        # Update rockets
-        for rocket in self.rockets:
-            rocket.update(gravity=Vec2(0, 0.1), drag=0.97)
-        
-        # Explode rockets that reached peak
-        for rocket in self.rockets[:]:
-            if rocket.age > rocket.lifetime * 0.6 or not rocket.is_alive():
-                self.explode(rocket.pos)
-                self.rockets.remove(rocket)
-        
-        # Update particles
-        for p in self.particles:
-            p.update(gravity=Vec2(0, 0.08), drag=0.96)
-        
-        self.particles = [p for p in self.particles if p.is_alive()]
-        self.frame += 1
-    
-    def render(self, screen: Screen):
-        screen.clear()
-        
-        # Draw rockets
-        for rocket in self.rockets:
-            screen.set_pixel(int(rocket.pos.x), int(rocket.pos.y), rocket.char, rocket.color)
-            # Trail
-            trail_y = int(rocket.pos.y) + 1
-            if 0 <= trail_y < self.height:
-                screen.set_pixel(int(rocket.pos.x), trail_y, '·', 33)
-        
-        # Draw particles
-        for p in self.particles:
-            screen.set_pixel(int(p.pos.x), int(p.pos.y), p.char, p.color)
-        
-        screen.draw_text(2, 1, "FIREWORKS DISPLAY", 36)
-        screen.draw_text(2, 2, f"Active: {len(self.particles) + len(self.rockets)}", 37)
-
-class MatrixRain:
-    """Scene 3: Matrix-style digital rain"""
-    def __init__(self, width: int, height: int):
-        self.width = width
-        self.height = height
-        self.columns = []
-        self.spawn_rate = 5
-        
-        for x in range(0, width, 2):
-            self.columns.append({
-                'x': x,
-                'y': random.randint(-20, 0),
-                'speed': random.uniform(0.3, 1.2),
-                'chars': [],
-                'active': random.random() > 0.5
-            })
-    
-    def update(self):
-        chars = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-        
-        for col in self.columns:
-            if col['active']:
-                col['y'] += col['speed']
-                
-                # Add new character at top
-                if random.random() > 0.7:
-                    col['chars'].append({
-                        'char': random.choice(chars),
-                        'y': col['y'],
-                        'age': 0
-                    })
-                
-                # Update existing characters
-                for char in col['chars']:
-                    char['age'] += 1
-                
-                # Remove old characters
-                col['chars'] = [c for c in col['chars'] if c['age'] < 20]
-                
-                # Reset column
-                if col['y'] > self.height + 10:
-                    col['y'] = random.randint(-20, -5)
-                    col['speed'] = random.uniform(0.3, 1.2)
-                    col['chars'] = []
-                    col['active'] = random.random() > 0.3
-            else:
-                if random.random() > 0.99:
-                    col['active'] = True
-    
-    def render(self, screen: Screen):
-        screen.clear()
-        
-        for col in self.columns:
-            for char_data in col['chars']:
-                y = int(char_data['y'] - col['y'] + char_data['age'])
-                if 0 <= y < self.height:
-                    # Fade effect
-                    if char_data['age'] < 2:
-                        color = 37  # White (bright)
-                    elif char_data['age'] < 5:
-                        color = 32  # Green (bright)
-                    elif char_data['age'] < 10:
-                        color = 32  # Green
-                    else:
-                        color = 32  # Green (dim)
-                    
-                    screen.set_pixel(col['x'], y, char_data['char'], color)
-        
-        screen.draw_text(2, 1, "MATRIX RAIN", 32)
-
-class SpiralGalaxy:
-    """Scene 4: Spiral galaxy simulation"""
-    def __init__(self, width: int, height: int):
-        self.width = width
-        self.height = height
-        self.center = Vec2(width / 2, height / 2)
-        self.particles: List[Particle] = []
-        self.spawn_rate = 5
-        self.angle_offset = 0
-        
-        # Create initial galaxy
-        for _ in range(200):
-            self.spawn_star()
-    
-    def spawn_star(self):
-        # Spiral arm generation
-        arm = random.randint(0, 3)
-        distance = random.uniform(5, min(self.width, self.height) / 2.5)
-        angle = random.uniform(0, 2 * math.pi) + arm * (math.pi / 2)
-        
-        # Add spiral curve
-        angle += distance * 0.1
-        
-        pos = Vec2(
-            self.center.x + math.cos(angle) * distance,
-            self.center.y + math.sin(angle) * distance * 0.5  # Flatten for ASCII
-        )
-        
-        # Orbital velocity
-        orbital_speed = 0.15 / (distance / 10 + 1)
-        vel = Vec2(
-            -math.sin(angle) * orbital_speed,
-            math.cos(angle) * orbital_speed * 0.5
-        )
-        
-        colors = [37, 36, 34, 35]
-        self.particles.append(Particle(
-            pos=pos,
-            vel=vel,
-            lifetime=1000,
-            char=random.choice(['·', '•', '*', '.']),
-            color=random.choice(colors)
-        ))
-    
-    def update(self):
-        self.angle_offset += 0.01
-        
-        # Spawn new stars occasionally
-        if random.random() > 0.95 and len(self.particles) < 300:
-            self.spawn_star()
-        
-        # Update particles with gravity toward center
-        for p in self.particles:
-            to_center = self.center - p.pos
-            distance = to_center.length()
-            
-            if distance > 1:
-                # Gravitational force
-                force = to_center.normalize() * (0.5 / distance)
-                p.vel = p.vel + force
-                p.vel = p.vel * 0.99  # Slight drag
-                p.pos = p.pos + p.vel
-            
-            p.age += 1
-        
-        # Remove particles that drifted too far
-        self.particles = [p for p in self.particles 
-                         if (p.pos - self.center).length() < min(self.width, self.height)]
-    
-    def render(self, screen: Screen):
-        screen.clear()
-        
-        # Draw particles
-        for p in self.particles:
-            distance = (p.pos - self.center).length()
-            # Size based on distance (perspective)
-            if distance < 10:
-                char = '*'
-            elif distance < 20:
-                char = '•'
-            else:
-                char = '·'
-            
-            screen.set_pixel(int(p.pos.x), int(p.pos.y), char, p.color)
-        
-        # Draw center
-        screen.set_pixel(int(self.center.x), int(self.center.y), '◉', 33)
-        
-        screen.draw_text(2, 1, "SPIRAL GALAXY", 36)
-        screen.draw_text(2, 2, f"Stars: {len(self.particles)}", 37)
-
-class GameOfLife:
-    """Scene 5: Conway's Game of Life with particle effects"""
-    def __init__(self, width: int, height: int):
-        self.width = width
-        self.height = height
-        self.grid = [[False for _ in range(width)] for _ in range(height)]
-        self.particles: List[Particle] = []
-        self.frame = 0
-        self.spawn_rate = 5
-        
-        # Initialize with random pattern
-        self.randomize()
-    
-    def randomize(self):
-        for y in range(self.height):
-            for x in range(self.width):
-                self.grid[y][x] = random.random() > 0.7
-    
-    def count_neighbors(self, x: int, y: int) -> int:
-        count = 0
-        for dy in [-1, 0, 1]:
-            for dx in [-1, 0, 1]:
-                if dx == 0 and dy == 0:
-                    continue
-                nx, ny = x + dx, y + dy
-                if 0 <= nx < self.width and 0 <= ny < self.height:
-                    if self.grid[ny][nx]:
-                        count += 1
-        return count
-    
-    def update(self):
-        # Update Game of Life every N frames
-        if self.frame % 5 == 0:
-            new_grid = [[False for _ in range(self.width)] for _ in range(self.height)]
-            
-            for y in range(self.height):
-                for x in range(self.width):
-                    neighbors = self.count_neighbors(x, y)
-                    
-                    if self.grid[y][x]:
-                        # Cell is alive
-                        new_grid[y][x] = neighbors in [2, 3]
-                        if not new_grid[y][x]:
-                            # Cell died - create particle effect
-                            if random.random() > 0.8:
-                                vel = Vec2(random.uniform(-0.5, 0.5), random.uniform(-0.5, 0.5))
-                                self.particles.append(Particle(
-                                    pos=Vec2(x, y),
-                                    vel=vel,
-                                    lifetime=random.randint(10, 20),
-                                    char='·',
-                                    color=31
-                                ))
-                    else:
-                        # Cell is dead
-                        if neighbors == 3:
-                            new_grid[y][x] = True
-                            # Cell born - create particle effect
-                            if random.random() > 0.8:
-                                vel = Vec2(random.uniform(-0.3, 0.3), random.uniform(-0.3, 0.3))
-                                self.particles.append(Particle(
-                                    pos=Vec2(x, y),
-                                    vel=vel,
-                                    lifetime=random.randint(10, 20),
-                                    char='*',
-                                    color=32
-                                ))
-            
-            self.grid = new_grid
-        
-        # Update particles
-        for p in self.particles:
-            p.update(drag=0.95)
-        
-        self.particles = [p for p in self.particles if p.is_alive()]
-        self.frame += 1
-    
-    def render(self, screen: Screen):
-        screen.clear()
-        
-        # Draw cells
-        for y in range(self.height):
-            for x in range(self.width):
-                if self.grid[y][x]:
-                    screen.set_pixel(x, y, '█', 32)
-        
-        # Draw particles
-        for p in self.particles:
-            screen.set_pixel(int(p.pos.x), int(p.pos.y), p.char, p.color)
-        
-        screen.draw_text(2, 1, "GAME OF LIFE", 36)
-        screen.draw_text(2, 2, f"Generation: {self.frame // 5}", 37)
-
-# ============================================================================
-# MAIN APPLICATION
-# ============================================================================
-
-class AnimationEngine:
-    """Main animation engine"""
-    def __init__(self):
-        # Get terminal size
-        size = os.get_terminal_size()
-        self.width = size.columns
-        self.height = size.lines - 1
-        
-        self.screen = Screen(self.width, self.height)
-        self.scenes = [
-            ParticleFountain(self.width, self.height),
-            Fireworks(self.width, self.height),
-            MatrixRain(self.width, self.height),
-            SpiralGalaxy(self.width, self.height),
-            GameOfLife(self.width, self.height)
-        ]
-        self.current_scene = 0
+        self.spatial_hash = SpatialHash(SMOOTHING_RADIUS, width, height)
+        self.gravity_strength = GRAVITY
         self.paused = False
-        self.running = True
-    
-    def handle_input(self, key):
-        scene = self.scenes[self.current_scene]
+        self.spawn_mode = True
         
-        if key == 'q' or key == 'Q':
-            self.running = False
-        elif key == 'p' or key == 'P':
-            self.paused = not self.paused
-        elif key == 'r' or key == 'R':
-            # Reset current scene
-            self.scenes[self.current_scene] = type(scene)(self.width, self.height)
-        elif key in ['1', '2', '3', '4', '5']:
-            self.current_scene = int(key) - 1
-        elif key == '+' or key == '=':
-            if hasattr(scene, 'spawn_rate'):
-                scene.spawn_rate = min(10, scene.spawn_rate + 1)
-        elif key == '-' or key == '_':
-            if hasattr(scene, 'spawn_rate'):
-                scene.spawn_rate = max(1, scene.spawn_rate - 1)
-        elif hasattr(scene, 'cursor'):
-            # Handle cursor movement for scenes that support it
-            if key == 'UP' and scene.cursor.y > 0:
-                scene.cursor.y -= 1
-            elif key == 'DOWN' and scene.cursor.y < self.height - 1:
-                scene.cursor.y += 1
-            elif key == 'LEFT' and scene.cursor.x > 0:
-                scene.cursor.x -= 1
-            elif key == 'RIGHT' and scene.cursor.x < self.width - 1:
-                scene.cursor.x += 1
+    def add_particle(self, x: float, y: float):
+        """Add a new particle at position"""
+        if len(self.particles) < MAX_PARTICLES:
+            # Add some randomness to initial velocity
+            vx = random.uniform(-50, 50)
+            vy = random.uniform(-50, 50)
+            color_idx = random.randint(0, len(PARTICLE_COLORS) - 1)
+            particle = Particle(x, y, vx, vy, color_idx=color_idx)
+            self.particles.append(particle)
     
-    def run(self):
-        # Clear screen and hide cursor
-        sys.stdout.write('\033[2J\033[?25l')
-        sys.stdout.flush()
+    def spawn_particles_at(self, x: float, y: float, count: int):
+        """Spawn multiple particles in a circle"""
+        for _ in range(count):
+            angle = random.uniform(0, 2 * math.pi)
+            radius = random.uniform(0, 20)
+            px = x + math.cos(angle) * radius
+            py = y + math.sin(angle) * radius
+            self.add_particle(px, py)
+    
+    def smoothing_kernel(self, distance: float, radius: float) -> float:
+        """Poly6 smoothing kernel for SPH"""
+        if distance >= radius:
+            return 0.0
         
-        try:
-            with InputHandler() as input_handler:
-                last_time = time.time()
+        volume = (math.pi * radius ** 4) / 6.0
+        value = max(0, radius ** 2 - distance ** 2)
+        return value ** 3 / volume
+    
+    def smoothing_kernel_derivative(self, distance: float, radius: float) -> float:
+        """Gradient of Spiky smoothing kernel"""
+        if distance >= radius or distance < 0.0001:
+            return 0.0
+        
+        volume = (math.pi * radius ** 5) / 10.0
+        value = radius - distance
+        return -3 * value ** 2 / volume
+    
+    def calculate_densities(self):
+        """Calculate density for each particle using SPH"""
+        for i, particle in enumerate(self.particles):
+            density = 0.0
+            nearby = self.spatial_hash.get_nearby(particle.x, particle.y)
+            
+            for j in nearby:
+                if j >= len(self.particles):
+                    continue
+                    
+                other = self.particles[j]
+                dx = other.x - particle.x
+                dy = other.y - particle.y
+                distance = math.sqrt(dx * dx + dy * dy)
                 
-                while self.running:
-                    current_time = time.time()
-                    dt = current_time - last_time
-                    
-                    # Handle input
-                    key = input_handler.get_key()
-                    if key:
-                        self.handle_input(key)
-                    
-                    # Update and render
-                    if not self.paused:
-                        self.scenes[self.current_scene].update()
-                    
-                    self.scenes[self.current_scene].render(self.screen)
-                    
-                    # Draw UI
-                    self.draw_ui()
-                    
-                    self.screen.render()
-                    
-                    # Target 30 FPS
-                    frame_time = time.time() - current_time
-                    sleep_time = max(0, (1.0 / 30.0) - frame_time)
-                    time.sleep(sleep_time)
-                    
-                    last_time = current_time
-        
-        finally:
-            # Show cursor and clear screen
-            sys.stdout.write('\033[?25h\033[2J\033[H')
-            sys.stdout.flush()
+                influence = self.smoothing_kernel(distance, SMOOTHING_RADIUS)
+                density += influence
+            
+            particle.density = density
+            particle.pressure = PRESSURE_MULTIPLIER * (density - TARGET_DENSITY)
     
-    def draw_ui(self):
-        # Bottom bar
-        y = self.height - 1
-        controls = "1-5:Scenes | ARROWS:Move | SPACE:Spawn | +/-:Rate | P:Pause | R:Reset | Q:Quit"
-        self.screen.draw_text(2, y, controls, 33)
-        
-        # Status
-        status = f"Scene {self.current_scene + 1}/5"
+    def calculate_pressure_forces(self):
+        """Calculate pressure and viscosity forces"""
+        for i, particle in enumerate(self.particles):
+            pressure_fx = 0.0
+            pressure_fy = 0.0
+            viscosity_fx = 0.0
+            viscosity_fy = 0.0
+            
+            nearby = self.spatial_hash.get_nearby(particle.x, particle.y)
+            
+            for j in nearby:
+                if i == j or j >= len(self.particles):
+                    continue
+                
+                other = self.particles[j]
+                dx = other.x - particle.x
+                dy = other.y - particle.y
+                distance = math.sqrt(dx * dx + dy * dy)
+                
+                if distance < 0.0001:
+                    continue
+                
+                # Pressure force
+                dir_x = dx / distance
+                dir_y = dy / distance
+                
+                slope = self.smoothing_kernel_derivative(distance, SMOOTHING_RADIUS)
+                shared_pressure = (particle.pressure + other.pressure) / 2.0
+                
+                pressure_fx -= shared_pressure * dir_x * slope / other.density if other.density > 0 else 0
+                pressure_fy -= shared_pressure * dir_y * slope / other.density if other.density > 0 else 0
+                
+                # Viscosity force
+                influence = self.smoothing_kernel(distance, SMOOTHING_RADIUS)
+                viscosity_fx += (other.vx - particle.vx) * influence * VISCOSITY
+                viscosity_fy += (other.vy - particle.vy) * influence * VISCOSITY
+            
+            # Store forces to apply later
+            particle.pressure_fx = pressure_fx
+            particle.pressure_fy = pressure_fy
+            particle.viscosity_fx = viscosity_fx
+            particle.viscosity_fy = viscosity_fy
+    
+    def update(self, dt: float):
+        """Update simulation one timestep"""
         if self.paused:
-            status += " [PAUSED]"
-        self.screen.draw_text(self.width - len(status) - 2, y, status, 33)
+            return
+        
+        # Rebuild spatial hash
+        self.spatial_hash.clear()
+        for i, particle in enumerate(self.particles):
+            self.spatial_hash.insert(particle, i)
+        
+        # SPH calculations
+        self.calculate_densities()
+        self.calculate_pressure_forces()
+        
+        # Apply forces and update positions
+        for particle in self.particles:
+            # Apply pressure and viscosity
+            particle.apply_force(particle.pressure_fx, particle.pressure_fy, dt)
+            particle.apply_force(particle.viscosity_fx, particle.viscosity_fy, dt)
+            
+            # Apply gravity
+            particle.apply_force(0, self.gravity_strength, dt)
+            
+            # Update position
+            particle.update_position(dt)
+            
+            # Apply damping
+            particle.vx *= DAMPING
+            particle.vy *= DAMPING
+            
+            # Boundary collisions
+            if particle.x < PARTICLE_RADIUS:
+                particle.x = PARTICLE_RADIUS
+                particle.vx *= -COLLISION_DAMPING
+            elif particle.x > self.width - PARTICLE_RADIUS:
+                particle.x = self.width - PARTICLE_RADIUS
+                particle.vx *= -COLLISION_DAMPING
+            
+            if particle.y < PARTICLE_RADIUS:
+                particle.y = PARTICLE_RADIUS
+                particle.vy *= -COLLISION_DAMPING
+            elif particle.y > self.height - PARTICLE_RADIUS:
+                particle.y = self.height - PARTICLE_RADIUS
+                particle.vy *= -COLLISION_DAMPING
+    
+    def draw(self, surface: pygame.Surface):
+        """Render particles to screen"""
+        surface.fill(BACKGROUND)
+        
+        # Draw particles with density-based coloring
+        for particle in self.particles:
+            # Color intensity based on density
+            density_factor = min(particle.density / (TARGET_DENSITY * 2), 1.0)
+            base_color = PARTICLE_COLORS[particle.color_idx]
+            
+            color = (
+                int(base_color[0] * (0.5 + 0.5 * density_factor)),
+                int(base_color[1] * (0.5 + 0.5 * density_factor)),
+                int(base_color[2] * (0.5 + 0.5 * density_factor))
+            )
+            
+            # Draw particle
+            pygame.draw.circle(surface, color, (int(particle.x), int(particle.y)), PARTICLE_RADIUS)
+            
+            # Draw glow effect for high density
+            if density_factor > 0.7:
+                glow_radius = PARTICLE_RADIUS + 2
+                glow_color = (*color, 50)
+                glow_surface = pygame.Surface((glow_radius * 2, glow_radius * 2), pygame.SRCALPHA)
+                pygame.draw.circle(glow_surface, glow_color, (glow_radius, glow_radius), glow_radius)
+                surface.blit(glow_surface, (int(particle.x) - glow_radius, int(particle.y) - glow_radius))
+
+def draw_ui(surface: pygame.Surface, simulation: FluidSimulation, fps: float):
+    """Draw UI overlay with instructions and stats"""
+    font = pygame.font.Font(None, 28)
+    small_font = pygame.font.Font(None, 22)
+    
+    # Instructions
+    instructions = [
+        "LEFT CLICK - Spawn particles",
+        "SPACE - Pause/Resume",
+        "R - Reset simulation",
+        "UP/DOWN - Adjust gravity",
+        "C - Clear all particles",
+    ]
+    
+    y_offset = 10
+    for instruction in instructions:
+        text = small_font.render(instruction, True, (200, 200, 200))
+        surface.blit(text, (10, y_offset))
+        y_offset += 25
+    
+    # Stats
+    stats = [
+        f"Particles: {len(simulation.particles)}/{MAX_PARTICLES}",
+        f"FPS: {int(fps)}",
+        f"Gravity: {int(simulation.gravity_strength)}",
+        f"Status: {'PAUSED' if simulation.paused else 'RUNNING'}",
+    ]
+    
+    y_offset = HEIGHT - 110
+    for stat in stats:
+        text = small_font.render(stat, True, (150, 255, 150))
+        surface.blit(text, (10, y_offset))
+        y_offset += 25
 
 def main():
-    if sys.platform == 'win32':
-        print("This program requires a Unix-like terminal (Linux/Mac/WSL)")
-        return
+    """Main game loop"""
+    pygame.init()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    pygame.display.set_caption("Fluid Simulation - SPH")
+    clock = pygame.time.Clock()
     
-    try:
-        engine = AnimationEngine()
-        engine.run()
-    except KeyboardInterrupt:
-        sys.stdout.write('\033[?25h\033[2J\033[H')
-        sys.stdout.flush()
-        print("\nAnimation stopped.")
+    simulation = FluidSimulation(WIDTH, HEIGHT)
+    
+    # Add initial particles
+    for _ in range(200):
+        x = random.uniform(WIDTH * 0.3, WIDTH * 0.7)
+        y = random.uniform(HEIGHT * 0.2, HEIGHT * 0.5)
+        simulation.add_particle(x, y)
+    
+    running = True
+    mouse_pressed = False
+    spawn_timer = 0
+    
+    while running:
+        dt = clock.tick(FPS) / 1000.0
+        dt = min(dt, 0.02)  # Cap dt to prevent instability
+        
+        # Event handling
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT:
+                running = False
+            
+            elif event.type == pygame.MOUSEBUTTONDOWN:
+                if event.button == 1:  # Left click
+                    mouse_pressed = True
+            
+            elif event.type == pygame.MOUSEBUTTONUP:
+                if event.button == 1:
+                    mouse_pressed = False
+            
+            elif event.type == pygame.KEYDOWN:
+                if event.key == pygame.K_SPACE:
+                    simulation.paused = not simulation.paused
+                
+                elif event.key == pygame.K_r:
+                    simulation.particles.clear()
+                    for _ in range(200):
+                        x = random.uniform(WIDTH * 0.3, WIDTH * 0.7)
+                        y = random.uniform(HEIGHT * 0.2, HEIGHT * 0.5)
+                        simulation.add_particle(x, y)
+                
+                elif event.key == pygame.K_c:
+                    simulation.particles.clear()
+                
+                elif event.key == pygame.K_UP:
+                    simulation.gravity_strength += 50
+                
+                elif event.key == pygame.K_DOWN:
+                    simulation.gravity_strength = max(0, simulation.gravity_strength - 50)
+        
+        # Spawn particles on mouse hold
+        if mouse_pressed:
+            spawn_timer += dt
+            if spawn_timer >= 1.0 / 60:  # Spawn every frame
+                mouse_x, mouse_y = pygame.mouse.get_pos()
+                simulation.spawn_particles_at(mouse_x, mouse_y, SPAWN_RATE)
+                spawn_timer = 0
+        
+        # Update simulation
+        simulation.update(dt)
+        
+        # Render
+        simulation.draw(screen)
+        draw_ui(screen, simulation, clock.get_fps())
+        
+        pygame.display.flip()
+    
+    pygame.quit()
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
