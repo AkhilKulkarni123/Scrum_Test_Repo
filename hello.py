@@ -22,6 +22,7 @@ import pygame.draw
 import numpy as np
 import ctypes
 import itertools
+import collections
 import math
 import random
 from dataclasses import dataclass
