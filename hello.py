@@ -1,436 +1,670 @@
 #!/usr/bin/env python3
 """
-ASCII Particle Physics Simulator
-A terminal-based particle system with gravity, collisions, and interactive effects.
-Press keys 1-7 to spawn different particle effects!
+Interactive ASCII Particle Animation System
+A terminal-based animation engine with multiple scenes, particle effects, and user controls.
+
+Controls:
+- Arrow keys: Move cursor/camera
+- Space: Spawn particles at cursor
+- 1-5: Switch scenes
+- +/-: Adjust particle spawn rate
+- P: Pause/unpause
+- R: Reset scene
+- Q: Quit
+
+Scenes:
+1. Particle fountain with gravity
+2. Fireworks display
+3. Matrix-style rain
+4. Spiral galaxy simulation
+5. Conway's Game of Life with particles
 """
 
-import curses
+import sys
+import os
+import time
 import random
 import math
-import time
+from collections import deque
 from dataclasses import dataclass
 from typing import List, Tuple
-from collections import deque
+import termios
+import tty
+import select
+
+# ============================================================================
+# UTILITY CLASSES AND FUNCTIONS
+# ============================================================================
+
+@dataclass
+class Vec2:
+    """2D vector for position and velocity"""
+    x: float
+    y: float
+    
+    def __add__(self, other):
+        return Vec2(self.x + other.x, self.y + other.y)
+    
+    def __sub__(self, other):
+        return Vec2(self.x - other.x, self.y - other.y)
+    
+    def __mul__(self, scalar):
+        return Vec2(self.x * scalar, self.y * scalar)
+    
+    def length(self):
+        return math.sqrt(self.x**2 + self.y**2)
+    
+    def normalize(self):
+        l = self.length()
+        if l > 0:
+            return Vec2(self.x / l, self.y / l)
+        return Vec2(0, 0)
 
 @dataclass
 class Particle:
-    x: float
-    y: float
-    vx: float
-    vy: float
-    life: float
-    max_life: float
-    char: str
-    color: int
-    mass: float = 1.0
-    trail: deque = None
+    """Individual particle with physics"""
+    pos: Vec2
+    vel: Vec2
+    age: int = 0
+    lifetime: int = 50
+    char: str = '*'
+    color: int = 37  # ANSI color code
     
-    def __post_init__(self):
-        if self.trail is None:
-            self.trail = deque(maxlen=5)
+    def update(self, gravity: Vec2 = Vec2(0, 0.1), drag: float = 0.99):
+        self.vel = self.vel + gravity
+        self.vel = self.vel * drag
+        self.pos = self.pos + self.vel
+        self.age += 1
+    
+    def is_alive(self):
+        return self.age < self.lifetime
 
-class ParticleSystem:
-    def __init__(self, width, height):
+class Screen:
+    """Terminal screen buffer"""
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        self.buffer = [[' ' for _ in range(width)] for _ in range(height)]
+        self.color_buffer = [[37 for _ in range(width)] for _ in range(height)]
+    
+    def clear(self):
+        self.buffer = [[' ' for _ in range(self.width)] for _ in range(self.height)]
+        self.color_buffer = [[37 for _ in range(self.width)] for _ in range(self.height)]
+    
+    def set_pixel(self, x: int, y: int, char: str, color: int = 37):
+        if 0 <= x < self.width and 0 <= y < self.height:
+            self.buffer[y][x] = char
+            self.color_buffer[y][x] = color
+    
+    def draw_text(self, x: int, y: int, text: str, color: int = 37):
+        for i, char in enumerate(text):
+            self.set_pixel(x + i, y, char, color)
+    
+    def render(self):
+        # Move cursor to top-left
+        sys.stdout.write('\033[H')
+        
+        for y in range(self.height):
+            line_parts = []
+            current_color = None
+            
+            for x in range(self.width):
+                color = self.color_buffer[y][x]
+                char = self.buffer[y][x]
+                
+                if color != current_color:
+                    if current_color is not None:
+                        line_parts.append('\033[0m')  # Reset
+                    line_parts.append(f'\033[{color}m')
+                    current_color = color
+                
+                line_parts.append(char)
+            
+            if current_color is not None:
+                line_parts.append('\033[0m')
+            
+            sys.stdout.write(''.join(line_parts) + '\n')
+        
+        sys.stdout.flush()
+
+class InputHandler:
+    """Non-blocking keyboard input handler"""
+    def __init__(self):
+        self.old_settings = None
+    
+    def __enter__(self):
+        self.old_settings = termios.tcgetattr(sys.stdin)
+        tty.setcbreak(sys.stdin.fileno())
+        return self
+    
+    def __exit__(self, type, value, traceback):
+        termios.tcsetattr(sys.stdin, termios.TCSADRAIN, self.old_settings)
+    
+    def get_key(self, timeout=0.001):
+        if select.select([sys.stdin], [], [], timeout)[0]:
+            key = sys.stdin.read(1)
+            # Handle arrow keys
+            if key == '\x1b':
+                next1 = sys.stdin.read(1)
+                next2 = sys.stdin.read(1)
+                if next1 == '[':
+                    return {'A': 'UP', 'B': 'DOWN', 'C': 'RIGHT', 'D': 'LEFT'}.get(next2, None)
+            return key
+        return None
+
+# ============================================================================
+# SCENE IMPLEMENTATIONS
+# ============================================================================
+
+class ParticleFountain:
+    """Scene 1: Particle fountain with gravity"""
+    def __init__(self, width: int, height: int):
         self.width = width
         self.height = height
         self.particles: List[Particle] = []
-        self.gravity = 0.3
-        self.wind = 0.0
-        self.time = 0
-        self.effects = {
-            '1': self.spawn_firework,
-            '2': self.spawn_fountain,
-            '3': self.spawn_explosion,
-            '4': self.spawn_rain,
-            '5': self.spawn_spiral,
-            '6': self.spawn_wave,
-            '7': self.spawn_galaxy
-        }
-        
-    def spawn_firework(self, x, y):
-        """Colorful firework explosion"""
-        colors = [curses.COLOR_RED, curses.COLOR_YELLOW, curses.COLOR_MAGENTA, 
-                  curses.COLOR_CYAN, curses.COLOR_GREEN]
-        color = random.choice(colors)
-        
-        for _ in range(80):
-            angle = random.uniform(0, 2 * math.pi)
-            speed = random.uniform(2, 8)
-            vx = math.cos(angle) * speed
-            vy = math.sin(angle) * speed
-            
-            chars = ['*', '✦', '✧', '◦', '•']
-            p = Particle(
-                x=x, y=y,
-                vx=vx, vy=vy,
-                life=random.uniform(1.5, 3.0),
-                max_life=3.0,
-                char=random.choice(chars),
-                color=color,
-                mass=random.uniform(0.5, 1.5)
-            )
-            self.particles.append(p)
+        self.cursor = Vec2(width // 2, height // 2)
+        self.spawn_rate = 5
+        self.frame = 0
     
-    def spawn_fountain(self, x, y):
-        """Upward fountain of particles"""
-        for _ in range(40):
-            vx = random.uniform(-2, 2)
-            vy = random.uniform(-12, -8)
-            color = random.choice([curses.COLOR_CYAN, curses.COLOR_BLUE, curses.COLOR_WHITE])
-            
-            p = Particle(
-                x=x, y=y,
-                vx=vx, vy=vy,
-                life=random.uniform(2.0, 4.0),
-                max_life=4.0,
-                char=random.choice(['~', '≈', '∼', '○']),
-                color=color,
-                mass=random.uniform(0.8, 1.2)
-            )
-            self.particles.append(p)
-    
-    def spawn_explosion(self, x, y):
-        """Violent explosion with shockwave"""
-        # Core explosion
-        for _ in range(100):
-            angle = random.uniform(0, 2 * math.pi)
-            speed = random.uniform(5, 15)
-            vx = math.cos(angle) * speed
-            vy = math.sin(angle) * speed
-            
-            p = Particle(
-                x=x, y=y,
-                vx=vx, vy=vy,
-                life=random.uniform(0.5, 2.0),
-                max_life=2.0,
-                char=random.choice(['#', '@', '%', '&']),
-                color=random.choice([curses.COLOR_RED, curses.COLOR_YELLOW]),
-                mass=random.uniform(0.3, 0.8)
-            )
-            self.particles.append(p)
-        
-        # Shockwave ring
-        for i in range(50):
-            angle = (i / 50) * 2 * math.pi
-            speed = 12
-            vx = math.cos(angle) * speed
-            vy = math.sin(angle) * speed
-            
-            p = Particle(
-                x=x, y=y,
-                vx=vx, vy=vy,
-                life=0.8,
-                max_life=0.8,
-                char='o',
-                color=curses.COLOR_WHITE,
-                mass=0.1
-            )
-            self.particles.append(p)
-    
-    def spawn_rain(self, x, y):
-        """Cascading rain effect"""
-        for _ in range(60):
-            offset_x = random.uniform(-30, 30)
-            p = Particle(
-                x=x + offset_x, y=y,
-                vx=random.uniform(-1, 1),
-                vy=random.uniform(8, 12),
-                life=random.uniform(3.0, 5.0),
-                max_life=5.0,
-                char=random.choice(['|', '¦', '│']),
-                color=curses.COLOR_BLUE,
-                mass=1.0
-            )
-            self.particles.append(p)
-    
-    def spawn_spiral(self, x, y):
-        """Spiraling particles"""
-        num_particles = 60
-        for i in range(num_particles):
-            angle = (i / num_particles) * 4 * math.pi
-            radius = 8
-            speed = 5
-            
-            vx = math.cos(angle) * speed + math.sin(angle) * 2
-            vy = math.sin(angle) * speed - math.cos(angle) * 2
-            
-            colors = [curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_YELLOW]
-            color = colors[i % len(colors)]
-            
-            p = Particle(
-                x=x, y=y,
-                vx=vx, vy=vy,
-                life=random.uniform(2.0, 4.0),
-                max_life=4.0,
-                char=random.choice(['◉', '◎', '●', '○']),
-                color=color,
-                mass=0.5
-            )
-            self.particles.append(p)
-    
-    def spawn_wave(self, x, y):
-        """Sine wave pattern"""
-        for i in range(80):
-            offset = (i - 40) * 2
-            angle = (i / 80) * 2 * math.pi
-            
-            vx = offset * 0.3
-            vy = math.sin(angle) * 8
-            
-            p = Particle(
-                x=x, y=y,
-                vx=vx, vy=vy,
-                life=random.uniform(2.0, 3.5),
-                max_life=3.5,
-                char=random.choice(['~', '≈', '∿']),
-                color=random.choice([curses.COLOR_CYAN, curses.COLOR_GREEN]),
-                mass=0.7
-            )
-            self.particles.append(p)
-    
-    def spawn_galaxy(self, x, y):
-        """Rotating galaxy effect"""
-        num_arms = 5
-        particles_per_arm = 20
-        
-        for arm in range(num_arms):
-            base_angle = (arm / num_arms) * 2 * math.pi
-            
-            for i in range(particles_per_arm):
-                t = i / particles_per_arm
-                angle = base_angle + t * 4 * math.pi
-                radius = t * 15
+    def update(self):
+        # Spawn new particles from cursor
+        if self.frame % (max(1, 10 - self.spawn_rate)) == 0:
+            for _ in range(random.randint(1, 3)):
+                angle = random.uniform(-math.pi/3, -2*math.pi/3)
+                speed = random.uniform(1, 2.5)
+                vel = Vec2(math.cos(angle) * speed, math.sin(angle) * speed)
                 
-                px = math.cos(angle) * radius
-                py = math.sin(angle) * radius
-                
-                # Orbital velocity
-                speed = 3 / (1 + t * 2)
-                vx = -math.sin(angle) * speed
-                vy = math.cos(angle) * speed
-                
-                colors = [curses.COLOR_WHITE, curses.COLOR_YELLOW, curses.COLOR_CYAN]
-                
-                p = Particle(
-                    x=x + px, y=y + py,
-                    vx=vx, vy=vy,
-                    life=random.uniform(3.0, 6.0),
-                    max_life=6.0,
-                    char=random.choice(['*', '·', '•', '✦']),
-                    color=random.choice(colors),
-                    mass=0.3
-                )
-                self.particles.append(p)
-    
-    def update(self, dt):
-        """Update all particles"""
-        self.time += dt
-        self.wind = math.sin(self.time * 0.5) * 1.5
+                colors = [31, 33, 36, 35, 34]  # Red, yellow, cyan, magenta, blue
+                self.particles.append(Particle(
+                    pos=Vec2(self.cursor.x, self.cursor.y),
+                    vel=vel,
+                    lifetime=random.randint(30, 60),
+                    char=random.choice(['*', '•', '○', '·']),
+                    color=random.choice(colors)
+                ))
         
-        particles_to_remove = []
-        
+        # Update particles
         for p in self.particles:
-            # Store trail position
-            p.trail.append((p.x, p.y))
-            
-            # Apply forces
-            p.vy += self.gravity * p.mass * dt * 60
-            p.vx += self.wind * dt * 10
-            
-            # Apply drag
-            drag = 0.99
-            p.vx *= drag
-            p.vy *= drag
-            
-            # Update position
-            p.x += p.vx * dt * 60
-            p.y += p.vy * dt * 60
-            
-            # Update life
-            p.life -= dt
-            
-            # Boundary bouncing
-            if p.x < 0:
-                p.x = 0
-                p.vx *= -0.7
-            elif p.x >= self.width:
-                p.x = self.width - 1
-                p.vx *= -0.7
-                
-            if p.y >= self.height - 1:
-                p.y = self.height - 1
-                p.vy *= -0.6
-                p.vx *= 0.8
-                if abs(p.vy) < 0.5:
-                    p.life = min(p.life, 0.5)
-            
-            # Mark dead particles
-            if p.life <= 0:
-                particles_to_remove.append(p)
+            p.update(gravity=Vec2(0, 0.15), drag=0.98)
         
         # Remove dead particles
-        for p in particles_to_remove:
-            self.particles.remove(p)
+        self.particles = [p for p in self.particles if p.is_alive()]
+        self.frame += 1
     
-    def render(self, screen):
-        """Render particles to screen"""
-        # Create buffer
-        buffer = [[' ' for _ in range(self.width)] for _ in range(self.height)]
-        color_buffer = [[0 for _ in range(self.width)] for _ in range(self.height)]
+    def render(self, screen: Screen):
+        screen.clear()
         
         # Draw particles
         for p in self.particles:
-            x, y = int(p.x), int(p.y)
+            alpha = 1.0 - (p.age / p.lifetime)
+            if alpha > 0.7:
+                char = p.char
+            elif alpha > 0.4:
+                char = '·'
+            else:
+                char = '.'
             
-            # Draw trail
-            if len(p.trail) > 1:
-                for i, (tx, ty) in enumerate(list(p.trail)[:-1]):
-                    tx, ty = int(tx), int(ty)
-                    if 0 <= tx < self.width and 0 <= ty < self.height:
-                        alpha = i / len(p.trail)
-                        if buffer[ty][tx] == ' ':
-                            buffer[ty][tx] = '·' if alpha > 0.5 else '.'
-                            color_buffer[ty][tx] = p.color
-            
-            # Draw particle
-            if 0 <= x < self.width and 0 <= y < self.height:
-                # Brightness based on life
-                life_ratio = p.life / p.max_life
-                if life_ratio > 0.7:
-                    char = p.char
-                elif life_ratio > 0.4:
-                    char = '.' if p.char in ['*', '✦', '✧'] else p.char
-                else:
-                    char = '.'
-                
-                buffer[y][x] = char
-                color_buffer[y][x] = p.color
+            screen.set_pixel(int(p.pos.x), int(p.pos.y), char, p.color)
         
-        # Render to screen
-        for y in range(min(self.height, curses.LINES - 1)):
-            for x in range(min(self.width, curses.COLS)):
-                char = buffer[y][x]
-                color = color_buffer[y][x]
-                
-                if char != ' ':
-                    try:
-                        screen.addstr(y, x, char, curses.color_pair(color + 1))
-                    except curses.error:
-                        pass
+        # Draw cursor
+        screen.set_pixel(int(self.cursor.x), int(self.cursor.y), '+', 32)
+        
+        # Draw info
+        screen.draw_text(2, 1, "PARTICLE FOUNTAIN", 36)
+        screen.draw_text(2, 2, f"Particles: {len(self.particles)}", 37)
+        screen.draw_text(2, 3, f"Spawn rate: {self.spawn_rate}", 37)
 
-def main(stdscr):
-    # Setup
-    curses.curs_set(0)  # Hide cursor
-    stdscr.nodelay(1)   # Non-blocking input
-    stdscr.timeout(0)
+class Fireworks:
+    """Scene 2: Fireworks display"""
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        self.particles: List[Particle] = []
+        self.rockets: List[Particle] = []
+        self.frame = 0
+        self.spawn_rate = 5
     
-    # Initialize colors
-    curses.start_color()
-    curses.use_default_colors()
+    def spawn_rocket(self):
+        x = random.randint(10, self.width - 10)
+        rocket = Particle(
+            pos=Vec2(x, self.height - 2),
+            vel=Vec2(random.uniform(-0.2, 0.2), random.uniform(-3, -4)),
+            lifetime=random.randint(20, 35),
+            char='|',
+            color=33
+        )
+        self.rockets.append(rocket)
     
-    # Setup color pairs
-    colors = [
-        curses.COLOR_BLACK,
-        curses.COLOR_RED,
-        curses.COLOR_GREEN,
-        curses.COLOR_YELLOW,
-        curses.COLOR_BLUE,
-        curses.COLOR_MAGENTA,
-        curses.COLOR_CYAN,
-        curses.COLOR_WHITE
-    ]
-    
-    for i, color in enumerate(colors):
-        curses.init_pair(i + 1, color, -1)
-    
-    # Get screen dimensions
-    height, width = stdscr.getmaxyx()
-    
-    # Create particle system
-    ps = ParticleSystem(width, height - 3)
-    
-    # Game loop
-    last_time = time.time()
-    frame_count = 0
-    fps = 0
-    
-    # Welcome message
-    instructions = [
-        "╔═══════════════════════════════════════════════════════════╗",
-        "║  ASCII PARTICLE PHYSICS SIMULATOR                        ║",
-        "║  Press 1-7 to spawn different effects:                   ║",
-        "║  [1] Firework  [2] Fountain  [3] Explosion  [4] Rain     ║",
-        "║  [5] Spiral    [6] Wave      [7] Galaxy     [Q] Quit     ║",
-        "╚═══════════════════════════════════════════════════════════╝"
-    ]
-    
-    # Spawn initial effect
-    ps.spawn_firework(width // 2, height // 2)
-    
-    while True:
-        current_time = time.time()
-        dt = current_time - last_time
-        last_time = current_time
+    def explode(self, pos: Vec2):
+        num_particles = random.randint(20, 40)
+        colors = [31, 33, 32, 36, 35, 34]
+        color = random.choice(colors)
         
-        # Calculate FPS
-        frame_count += 1
-        if frame_count % 30 == 0:
-            fps = int(1 / dt) if dt > 0 else 0
-        
-        # Handle input
-        try:
-            key = stdscr.getkey()
+        for _ in range(num_particles):
+            angle = random.uniform(0, 2 * math.pi)
+            speed = random.uniform(0.5, 2.5)
+            vel = Vec2(math.cos(angle) * speed, math.sin(angle) * speed)
             
-            if key.lower() == 'q':
-                break
-            elif key in ps.effects:
-                # Spawn at random position
-                x = random.randint(width // 4, 3 * width // 4)
-                y = random.randint(height // 4, 3 * height // 4)
-                ps.effects[key](x, y)
-        except:
-            pass
+            self.particles.append(Particle(
+                pos=Vec2(pos.x, pos.y),
+                vel=vel,
+                lifetime=random.randint(15, 35),
+                char=random.choice(['*', '•', '○', '+']),
+                color=color
+            ))
+    
+    def update(self):
+        # Spawn rockets
+        if self.frame % (max(1, 30 - self.spawn_rate * 3)) == 0:
+            self.spawn_rocket()
         
-        # Auto-spawn effects occasionally
-        if random.random() < 0.01:
-            effect = random.choice(list(ps.effects.values()))
-            x = random.randint(width // 4, 3 * width // 4)
-            y = random.randint(height // 4, 3 * height // 4)
-            effect(x, y)
+        # Update rockets
+        for rocket in self.rockets:
+            rocket.update(gravity=Vec2(0, 0.1), drag=0.97)
         
-        # Update
-        ps.update(dt)
+        # Explode rockets that reached peak
+        for rocket in self.rockets[:]:
+            if rocket.age > rocket.lifetime * 0.6 or not rocket.is_alive():
+                self.explode(rocket.pos)
+                self.rockets.remove(rocket)
         
-        # Render
-        stdscr.clear()
-        ps.render(stdscr)
+        # Update particles
+        for p in self.particles:
+            p.update(gravity=Vec2(0, 0.08), drag=0.96)
         
-        # Draw UI
-        try:
-            for i, line in enumerate(instructions):
-                if i < height - 1:
-                    stdscr.addstr(height - len(instructions) + i - 1, 
-                                max(0, (width - len(line)) // 2), 
-                                line[:width], 
-                                curses.color_pair(7))
-            
-            # Stats
-            stats = f" Particles: {len(ps.particles)} | FPS: {fps} | Wind: {ps.wind:.1f} "
-            stdscr.addstr(0, 0, stats, curses.color_pair(6))
-        except curses.error:
-            pass
+        self.particles = [p for p in self.particles if p.is_alive()]
+        self.frame += 1
+    
+    def render(self, screen: Screen):
+        screen.clear()
         
-        stdscr.refresh()
+        # Draw rockets
+        for rocket in self.rockets:
+            screen.set_pixel(int(rocket.pos.x), int(rocket.pos.y), rocket.char, rocket.color)
+            # Trail
+            trail_y = int(rocket.pos.y) + 1
+            if 0 <= trail_y < self.height:
+                screen.set_pixel(int(rocket.pos.x), trail_y, '·', 33)
         
-        # Frame rate limiting
-        time.sleep(0.016)  # ~60 FPS
+        # Draw particles
+        for p in self.particles:
+            screen.set_pixel(int(p.pos.x), int(p.pos.y), p.char, p.color)
+        
+        screen.draw_text(2, 1, "FIREWORKS DISPLAY", 36)
+        screen.draw_text(2, 2, f"Active: {len(self.particles) + len(self.rockets)}", 37)
 
-if __name__ == "__main__":
+class MatrixRain:
+    """Scene 3: Matrix-style digital rain"""
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        self.columns = []
+        self.spawn_rate = 5
+        
+        for x in range(0, width, 2):
+            self.columns.append({
+                'x': x,
+                'y': random.randint(-20, 0),
+                'speed': random.uniform(0.3, 1.2),
+                'chars': [],
+                'active': random.random() > 0.5
+            })
+    
+    def update(self):
+        chars = "アイウエオカキクケコサシスセソタチツテトナニヌネノハヒフヘホマミムメモヤユヨラリルレロワヲン0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+        
+        for col in self.columns:
+            if col['active']:
+                col['y'] += col['speed']
+                
+                # Add new character at top
+                if random.random() > 0.7:
+                    col['chars'].append({
+                        'char': random.choice(chars),
+                        'y': col['y'],
+                        'age': 0
+                    })
+                
+                # Update existing characters
+                for char in col['chars']:
+                    char['age'] += 1
+                
+                # Remove old characters
+                col['chars'] = [c for c in col['chars'] if c['age'] < 20]
+                
+                # Reset column
+                if col['y'] > self.height + 10:
+                    col['y'] = random.randint(-20, -5)
+                    col['speed'] = random.uniform(0.3, 1.2)
+                    col['chars'] = []
+                    col['active'] = random.random() > 0.3
+            else:
+                if random.random() > 0.99:
+                    col['active'] = True
+    
+    def render(self, screen: Screen):
+        screen.clear()
+        
+        for col in self.columns:
+            for char_data in col['chars']:
+                y = int(char_data['y'] - col['y'] + char_data['age'])
+                if 0 <= y < self.height:
+                    # Fade effect
+                    if char_data['age'] < 2:
+                        color = 37  # White (bright)
+                    elif char_data['age'] < 5:
+                        color = 32  # Green (bright)
+                    elif char_data['age'] < 10:
+                        color = 32  # Green
+                    else:
+                        color = 32  # Green (dim)
+                    
+                    screen.set_pixel(col['x'], y, char_data['char'], color)
+        
+        screen.draw_text(2, 1, "MATRIX RAIN", 32)
+
+class SpiralGalaxy:
+    """Scene 4: Spiral galaxy simulation"""
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        self.center = Vec2(width / 2, height / 2)
+        self.particles: List[Particle] = []
+        self.spawn_rate = 5
+        self.angle_offset = 0
+        
+        # Create initial galaxy
+        for _ in range(200):
+            self.spawn_star()
+    
+    def spawn_star(self):
+        # Spiral arm generation
+        arm = random.randint(0, 3)
+        distance = random.uniform(5, min(self.width, self.height) / 2.5)
+        angle = random.uniform(0, 2 * math.pi) + arm * (math.pi / 2)
+        
+        # Add spiral curve
+        angle += distance * 0.1
+        
+        pos = Vec2(
+            self.center.x + math.cos(angle) * distance,
+            self.center.y + math.sin(angle) * distance * 0.5  # Flatten for ASCII
+        )
+        
+        # Orbital velocity
+        orbital_speed = 0.15 / (distance / 10 + 1)
+        vel = Vec2(
+            -math.sin(angle) * orbital_speed,
+            math.cos(angle) * orbital_speed * 0.5
+        )
+        
+        colors = [37, 36, 34, 35]
+        self.particles.append(Particle(
+            pos=pos,
+            vel=vel,
+            lifetime=1000,
+            char=random.choice(['·', '•', '*', '.']),
+            color=random.choice(colors)
+        ))
+    
+    def update(self):
+        self.angle_offset += 0.01
+        
+        # Spawn new stars occasionally
+        if random.random() > 0.95 and len(self.particles) < 300:
+            self.spawn_star()
+        
+        # Update particles with gravity toward center
+        for p in self.particles:
+            to_center = self.center - p.pos
+            distance = to_center.length()
+            
+            if distance > 1:
+                # Gravitational force
+                force = to_center.normalize() * (0.5 / distance)
+                p.vel = p.vel + force
+                p.vel = p.vel * 0.99  # Slight drag
+                p.pos = p.pos + p.vel
+            
+            p.age += 1
+        
+        # Remove particles that drifted too far
+        self.particles = [p for p in self.particles 
+                         if (p.pos - self.center).length() < min(self.width, self.height)]
+    
+    def render(self, screen: Screen):
+        screen.clear()
+        
+        # Draw particles
+        for p in self.particles:
+            distance = (p.pos - self.center).length()
+            # Size based on distance (perspective)
+            if distance < 10:
+                char = '*'
+            elif distance < 20:
+                char = '•'
+            else:
+                char = '·'
+            
+            screen.set_pixel(int(p.pos.x), int(p.pos.y), char, p.color)
+        
+        # Draw center
+        screen.set_pixel(int(self.center.x), int(self.center.y), '◉', 33)
+        
+        screen.draw_text(2, 1, "SPIRAL GALAXY", 36)
+        screen.draw_text(2, 2, f"Stars: {len(self.particles)}", 37)
+
+class GameOfLife:
+    """Scene 5: Conway's Game of Life with particle effects"""
+    def __init__(self, width: int, height: int):
+        self.width = width
+        self.height = height
+        self.grid = [[False for _ in range(width)] for _ in range(height)]
+        self.particles: List[Particle] = []
+        self.frame = 0
+        self.spawn_rate = 5
+        
+        # Initialize with random pattern
+        self.randomize()
+    
+    def randomize(self):
+        for y in range(self.height):
+            for x in range(self.width):
+                self.grid[y][x] = random.random() > 0.7
+    
+    def count_neighbors(self, x: int, y: int) -> int:
+        count = 0
+        for dy in [-1, 0, 1]:
+            for dx in [-1, 0, 1]:
+                if dx == 0 and dy == 0:
+                    continue
+                nx, ny = x + dx, y + dy
+                if 0 <= nx < self.width and 0 <= ny < self.height:
+                    if self.grid[ny][nx]:
+                        count += 1
+        return count
+    
+    def update(self):
+        # Update Game of Life every N frames
+        if self.frame % 5 == 0:
+            new_grid = [[False for _ in range(self.width)] for _ in range(self.height)]
+            
+            for y in range(self.height):
+                for x in range(self.width):
+                    neighbors = self.count_neighbors(x, y)
+                    
+                    if self.grid[y][x]:
+                        # Cell is alive
+                        new_grid[y][x] = neighbors in [2, 3]
+                        if not new_grid[y][x]:
+                            # Cell died - create particle effect
+                            if random.random() > 0.8:
+                                vel = Vec2(random.uniform(-0.5, 0.5), random.uniform(-0.5, 0.5))
+                                self.particles.append(Particle(
+                                    pos=Vec2(x, y),
+                                    vel=vel,
+                                    lifetime=random.randint(10, 20),
+                                    char='·',
+                                    color=31
+                                ))
+                    else:
+                        # Cell is dead
+                        if neighbors == 3:
+                            new_grid[y][x] = True
+                            # Cell born - create particle effect
+                            if random.random() > 0.8:
+                                vel = Vec2(random.uniform(-0.3, 0.3), random.uniform(-0.3, 0.3))
+                                self.particles.append(Particle(
+                                    pos=Vec2(x, y),
+                                    vel=vel,
+                                    lifetime=random.randint(10, 20),
+                                    char='*',
+                                    color=32
+                                ))
+            
+            self.grid = new_grid
+        
+        # Update particles
+        for p in self.particles:
+            p.update(drag=0.95)
+        
+        self.particles = [p for p in self.particles if p.is_alive()]
+        self.frame += 1
+    
+    def render(self, screen: Screen):
+        screen.clear()
+        
+        # Draw cells
+        for y in range(self.height):
+            for x in range(self.width):
+                if self.grid[y][x]:
+                    screen.set_pixel(x, y, '█', 32)
+        
+        # Draw particles
+        for p in self.particles:
+            screen.set_pixel(int(p.pos.x), int(p.pos.y), p.char, p.color)
+        
+        screen.draw_text(2, 1, "GAME OF LIFE", 36)
+        screen.draw_text(2, 2, f"Generation: {self.frame // 5}", 37)
+
+# ============================================================================
+# MAIN APPLICATION
+# ============================================================================
+
+class AnimationEngine:
+    """Main animation engine"""
+    def __init__(self):
+        # Get terminal size
+        size = os.get_terminal_size()
+        self.width = size.columns
+        self.height = size.lines - 1
+        
+        self.screen = Screen(self.width, self.height)
+        self.scenes = [
+            ParticleFountain(self.width, self.height),
+            Fireworks(self.width, self.height),
+            MatrixRain(self.width, self.height),
+            SpiralGalaxy(self.width, self.height),
+            GameOfLife(self.width, self.height)
+        ]
+        self.current_scene = 0
+        self.paused = False
+        self.running = True
+    
+    def handle_input(self, key):
+        scene = self.scenes[self.current_scene]
+        
+        if key == 'q' or key == 'Q':
+            self.running = False
+        elif key == 'p' or key == 'P':
+            self.paused = not self.paused
+        elif key == 'r' or key == 'R':
+            # Reset current scene
+            self.scenes[self.current_scene] = type(scene)(self.width, self.height)
+        elif key in ['1', '2', '3', '4', '5']:
+            self.current_scene = int(key) - 1
+        elif key == '+' or key == '=':
+            if hasattr(scene, 'spawn_rate'):
+                scene.spawn_rate = min(10, scene.spawn_rate + 1)
+        elif key == '-' or key == '_':
+            if hasattr(scene, 'spawn_rate'):
+                scene.spawn_rate = max(1, scene.spawn_rate - 1)
+        elif hasattr(scene, 'cursor'):
+            # Handle cursor movement for scenes that support it
+            if key == 'UP' and scene.cursor.y > 0:
+                scene.cursor.y -= 1
+            elif key == 'DOWN' and scene.cursor.y < self.height - 1:
+                scene.cursor.y += 1
+            elif key == 'LEFT' and scene.cursor.x > 0:
+                scene.cursor.x -= 1
+            elif key == 'RIGHT' and scene.cursor.x < self.width - 1:
+                scene.cursor.x += 1
+    
+    def run(self):
+        # Clear screen and hide cursor
+        sys.stdout.write('\033[2J\033[?25l')
+        sys.stdout.flush()
+        
+        try:
+            with InputHandler() as input_handler:
+                last_time = time.time()
+                
+                while self.running:
+                    current_time = time.time()
+                    dt = current_time - last_time
+                    
+                    # Handle input
+                    key = input_handler.get_key()
+                    if key:
+                        self.handle_input(key)
+                    
+                    # Update and render
+                    if not self.paused:
+                        self.scenes[self.current_scene].update()
+                    
+                    self.scenes[self.current_scene].render(self.screen)
+                    
+                    # Draw UI
+                    self.draw_ui()
+                    
+                    self.screen.render()
+                    
+                    # Target 30 FPS
+                    frame_time = time.time() - current_time
+                    sleep_time = max(0, (1.0 / 30.0) - frame_time)
+                    time.sleep(sleep_time)
+                    
+                    last_time = current_time
+        
+        finally:
+            # Show cursor and clear screen
+            sys.stdout.write('\033[?25h\033[2J\033[H')
+            sys.stdout.flush()
+    
+    def draw_ui(self):
+        # Bottom bar
+        y = self.height - 1
+        controls = "1-5:Scenes | ARROWS:Move | SPACE:Spawn | +/-:Rate | P:Pause | R:Reset | Q:Quit"
+        self.screen.draw_text(2, y, controls, 33)
+        
+        # Status
+        status = f"Scene {self.current_scene + 1}/5"
+        if self.paused:
+            status += " [PAUSED]"
+        self.screen.draw_text(self.width - len(status) - 2, y, status, 33)
+
+def main():
+    if sys.platform == 'win32':
+        print("This program requires a Unix-like terminal (Linux/Mac/WSL)")
+        return
+    
     try:
-        curses.wrapper(main)
+        engine = AnimationEngine()
+        engine.run()
     except KeyboardInterrupt:
-        print("\nParticle simulator closed. Thanks for playing!")
-    except Exception as e:
-        print(f"\nError: {e}")
-        print("Make sure your terminal supports color and is large enough!")
+        sys.stdout.write('\033[?25h\033[2J\033[H')
+        sys.stdout.flush()
+        print("\nAnimation stopped.")
+
+if __name__ == '__main__':
+    main()
