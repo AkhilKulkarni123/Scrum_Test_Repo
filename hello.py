@@ -4,6 +4,7 @@ Features: Real-time physics, color gradients, interactive spawning, gravity cont
 Requirements: pip install pygame numpy
 """
 import sys
+import time
 import pygame
 import numpy as np
 import math
