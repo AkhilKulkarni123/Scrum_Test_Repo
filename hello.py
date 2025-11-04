@@ -21,6 +21,7 @@ import pygame.font
 import pygame.draw
 import numpy as np
 import ctypes
+import itertools
 import math
 import random
 from dataclasses import dataclass
