@@ -1,290 +1,436 @@
-import pygame
-import math
+#!/usr/bin/env python3
+"""
+ASCII Particle Physics Simulator
+A terminal-based particle system with gravity, collisions, and interactive effects.
+Press keys 1-7 to spawn different particle effects!
+"""
+
+import curses
 import random
-from pygame import gfxdraw
+import math
+import time
+from dataclasses import dataclass
+from typing import List, Tuple
+from collections import deque
 
-# Initialize Pygame
-pygame.init()
+@dataclass
+class Particle:
+    x: float
+    y: float
+    vx: float
+    vy: float
+    life: float
+    max_life: float
+    char: str
+    color: int
+    mass: float = 1.0
+    trail: deque = None
+    
+    def __post_init__(self):
+        if self.trail is None:
+            self.trail = deque(maxlen=5)
 
-# Constants
-WIDTH, HEIGHT = 1400, 900
-FPS = 60
-AU = 149.6e6 * 1000  # Astronomical Unit in meters
-G = 6.67428e-11  # Gravitational constant
-SCALE = 200 / AU  # 1 AU = 200 pixels
-TIMESTEP = 3600 * 24  # 1 day in seconds
-
-# Colors
-BLACK = (0, 0, 0)
-WHITE = (255, 255, 255)
-YELLOW = (255, 255, 0)
-GREY = (128, 128, 128)
-ORANGE = (255, 140, 0)
-BLUE = (100, 149, 237)
-RED = (188, 39, 50)
-DARK_GREY = (80, 78, 81)
-LIGHT_BLUE = (173, 216, 230)
-PALE_YELLOW = (245, 222, 179)
-PALE_BLUE = (176, 224, 230)
-
-class CelestialBody:
-    def __init__(self, x, y, radius, color, mass, name):
-        self.x = x
-        self.y = y
-        self.radius = radius
-        self.color = color
-        self.mass = mass
-        self.name = name
-        self.orbit = []
-        self.sun = False
-        self.distance_to_sun = 0
-        self.x_vel = 0
-        self.y_vel = 0
+class ParticleSystem:
+    def __init__(self, width, height):
+        self.width = width
+        self.height = height
+        self.particles: List[Particle] = []
+        self.gravity = 0.3
+        self.wind = 0.0
+        self.time = 0
+        self.effects = {
+            '1': self.spawn_firework,
+            '2': self.spawn_fountain,
+            '3': self.spawn_explosion,
+            '4': self.spawn_rain,
+            '5': self.spawn_spiral,
+            '6': self.spawn_wave,
+            '7': self.spawn_galaxy
+        }
         
-    def draw(self, win, offset_x, offset_y, zoom):
-        x = self.x * SCALE * zoom + WIDTH / 2 + offset_x
-        y = self.y * SCALE * zoom + HEIGHT / 2 + offset_y
+    def spawn_firework(self, x, y):
+        """Colorful firework explosion"""
+        colors = [curses.COLOR_RED, curses.COLOR_YELLOW, curses.COLOR_MAGENTA, 
+                  curses.COLOR_CYAN, curses.COLOR_GREEN]
+        color = random.choice(colors)
         
-        # Draw orbit trail
-        if len(self.orbit) > 2:
-            updated_points = []
-            for point in self.orbit:
-                px, py = point
-                px = px * SCALE * zoom + WIDTH / 2 + offset_x
-                py = py * SCALE * zoom + HEIGHT / 2 + offset_y
-                updated_points.append((px, py))
+        for _ in range(80):
+            angle = random.uniform(0, 2 * math.pi)
+            speed = random.uniform(2, 8)
+            vx = math.cos(angle) * speed
+            vy = math.sin(angle) * speed
             
-            if len(updated_points) > 1:
-                pygame.draw.lines(win, self.color, False, updated_points, 1)
-        
-        # Draw planet with glow effect
-        radius = max(int(self.radius * zoom), 2)
-        
-        # Glow effect
-        for i in range(3):
-            glow_radius = radius + (3 - i) * 2
-            glow_color = tuple(min(255, c + 40) for c in self.color)
-            gfxdraw.filled_circle(win, int(x), int(y), glow_radius, (*glow_color, 50))
-        
-        # Main body
-        pygame.draw.circle(win, self.color, (int(x), int(y)), radius)
-        
-        # Add some texture for larger bodies
-        if radius > 5:
-            pygame.draw.circle(win, tuple(max(0, c - 30) for c in self.color), 
-                             (int(x - radius/3), int(y - radius/3)), max(1, radius // 4))
-        
-        # Draw name
-        if zoom > 0.5:
-            font = pygame.font.SysFont("comicsans", max(12, int(14 * zoom)))
-            text = font.render(self.name, 1, WHITE)
-            win.blit(text, (x - text.get_width() / 2, y - text.get_height() / 2 - radius - 15))
+            chars = ['*', '✦', '✧', '◦', '•']
+            p = Particle(
+                x=x, y=y,
+                vx=vx, vy=vy,
+                life=random.uniform(1.5, 3.0),
+                max_life=3.0,
+                char=random.choice(chars),
+                color=color,
+                mass=random.uniform(0.5, 1.5)
+            )
+            self.particles.append(p)
     
-    def attraction(self, other):
-        other_x, other_y = other.x, other.y
-        distance_x = other_x - self.x
-        distance_y = other_y - self.y
-        distance = math.sqrt(distance_x ** 2 + distance_y ** 2)
-        
-        if other.sun:
-            self.distance_to_sun = distance
-        
-        force = G * self.mass * other.mass / distance ** 2
-        theta = math.atan2(distance_y, distance_x)
-        force_x = math.cos(theta) * force
-        force_y = math.sin(theta) * force
-        return force_x, force_y
-    
-    def update_position(self, bodies):
-        total_fx = total_fy = 0
-        for body in bodies:
-            if self == body:
-                continue
+    def spawn_fountain(self, x, y):
+        """Upward fountain of particles"""
+        for _ in range(40):
+            vx = random.uniform(-2, 2)
+            vy = random.uniform(-12, -8)
+            color = random.choice([curses.COLOR_CYAN, curses.COLOR_BLUE, curses.COLOR_WHITE])
             
-            fx, fy = self.attraction(body)
-            total_fx += fx
-            total_fy += fy
-        
-        self.x_vel += total_fx / self.mass * TIMESTEP
-        self.y_vel += total_fy / self.mass * TIMESTEP
-        
-        self.x += self.x_vel * TIMESTEP
-        self.y += self.y_vel * TIMESTEP
-        self.orbit.append((self.x, self.y))
-        
-        if len(self.orbit) > 1000:
-            self.orbit.pop(0)
-
-class Star:
-    def __init__(self, x, y, brightness):
-        self.x = x
-        self.y = y
-        self.brightness = brightness
-        self.twinkle_offset = random.uniform(0, math.pi * 2)
-
-def create_starfield(num_stars):
-    stars = []
-    for _ in range(num_stars):
-        x = random.randint(0, WIDTH)
-        y = random.randint(0, HEIGHT)
-        brightness = random.randint(100, 255)
-        stars.append(Star(x, y, brightness))
-    return stars
-
-def draw_starfield(win, stars, frame_count):
-    for star in stars:
-        twinkle = abs(math.sin(frame_count * 0.02 + star.twinkle_offset))
-        brightness = int(star.brightness * (0.5 + 0.5 * twinkle))
-        color = (brightness, brightness, brightness)
-        pygame.draw.circle(win, color, (star.x, star.y), 1)
-
-def draw_ui(win, bodies, paused, speed_multiplier, zoom, show_info):
-    font = pygame.font.SysFont("comicsans", 16)
+            p = Particle(
+                x=x, y=y,
+                vx=vx, vy=vy,
+                life=random.uniform(2.0, 4.0),
+                max_life=4.0,
+                char=random.choice(['~', '≈', '∼', '○']),
+                color=color,
+                mass=random.uniform(0.8, 1.2)
+            )
+            self.particles.append(p)
     
-    # Control instructions
-    instructions = [
-        "Controls:",
-        "SPACE - Pause/Resume",
-        "Arrow Keys - Pan view",
-        "+/- - Zoom in/out",
-        "UP/DOWN - Speed up/slow down time",
-        "I - Toggle planet info",
-        "R - Reset view"
+    def spawn_explosion(self, x, y):
+        """Violent explosion with shockwave"""
+        # Core explosion
+        for _ in range(100):
+            angle = random.uniform(0, 2 * math.pi)
+            speed = random.uniform(5, 15)
+            vx = math.cos(angle) * speed
+            vy = math.sin(angle) * speed
+            
+            p = Particle(
+                x=x, y=y,
+                vx=vx, vy=vy,
+                life=random.uniform(0.5, 2.0),
+                max_life=2.0,
+                char=random.choice(['#', '@', '%', '&']),
+                color=random.choice([curses.COLOR_RED, curses.COLOR_YELLOW]),
+                mass=random.uniform(0.3, 0.8)
+            )
+            self.particles.append(p)
+        
+        # Shockwave ring
+        for i in range(50):
+            angle = (i / 50) * 2 * math.pi
+            speed = 12
+            vx = math.cos(angle) * speed
+            vy = math.sin(angle) * speed
+            
+            p = Particle(
+                x=x, y=y,
+                vx=vx, vy=vy,
+                life=0.8,
+                max_life=0.8,
+                char='o',
+                color=curses.COLOR_WHITE,
+                mass=0.1
+            )
+            self.particles.append(p)
+    
+    def spawn_rain(self, x, y):
+        """Cascading rain effect"""
+        for _ in range(60):
+            offset_x = random.uniform(-30, 30)
+            p = Particle(
+                x=x + offset_x, y=y,
+                vx=random.uniform(-1, 1),
+                vy=random.uniform(8, 12),
+                life=random.uniform(3.0, 5.0),
+                max_life=5.0,
+                char=random.choice(['|', '¦', '│']),
+                color=curses.COLOR_BLUE,
+                mass=1.0
+            )
+            self.particles.append(p)
+    
+    def spawn_spiral(self, x, y):
+        """Spiraling particles"""
+        num_particles = 60
+        for i in range(num_particles):
+            angle = (i / num_particles) * 4 * math.pi
+            radius = 8
+            speed = 5
+            
+            vx = math.cos(angle) * speed + math.sin(angle) * 2
+            vy = math.sin(angle) * speed - math.cos(angle) * 2
+            
+            colors = [curses.COLOR_MAGENTA, curses.COLOR_CYAN, curses.COLOR_YELLOW]
+            color = colors[i % len(colors)]
+            
+            p = Particle(
+                x=x, y=y,
+                vx=vx, vy=vy,
+                life=random.uniform(2.0, 4.0),
+                max_life=4.0,
+                char=random.choice(['◉', '◎', '●', '○']),
+                color=color,
+                mass=0.5
+            )
+            self.particles.append(p)
+    
+    def spawn_wave(self, x, y):
+        """Sine wave pattern"""
+        for i in range(80):
+            offset = (i - 40) * 2
+            angle = (i / 80) * 2 * math.pi
+            
+            vx = offset * 0.3
+            vy = math.sin(angle) * 8
+            
+            p = Particle(
+                x=x, y=y,
+                vx=vx, vy=vy,
+                life=random.uniform(2.0, 3.5),
+                max_life=3.5,
+                char=random.choice(['~', '≈', '∿']),
+                color=random.choice([curses.COLOR_CYAN, curses.COLOR_GREEN]),
+                mass=0.7
+            )
+            self.particles.append(p)
+    
+    def spawn_galaxy(self, x, y):
+        """Rotating galaxy effect"""
+        num_arms = 5
+        particles_per_arm = 20
+        
+        for arm in range(num_arms):
+            base_angle = (arm / num_arms) * 2 * math.pi
+            
+            for i in range(particles_per_arm):
+                t = i / particles_per_arm
+                angle = base_angle + t * 4 * math.pi
+                radius = t * 15
+                
+                px = math.cos(angle) * radius
+                py = math.sin(angle) * radius
+                
+                # Orbital velocity
+                speed = 3 / (1 + t * 2)
+                vx = -math.sin(angle) * speed
+                vy = math.cos(angle) * speed
+                
+                colors = [curses.COLOR_WHITE, curses.COLOR_YELLOW, curses.COLOR_CYAN]
+                
+                p = Particle(
+                    x=x + px, y=y + py,
+                    vx=vx, vy=vy,
+                    life=random.uniform(3.0, 6.0),
+                    max_life=6.0,
+                    char=random.choice(['*', '·', '•', '✦']),
+                    color=random.choice(colors),
+                    mass=0.3
+                )
+                self.particles.append(p)
+    
+    def update(self, dt):
+        """Update all particles"""
+        self.time += dt
+        self.wind = math.sin(self.time * 0.5) * 1.5
+        
+        particles_to_remove = []
+        
+        for p in self.particles:
+            # Store trail position
+            p.trail.append((p.x, p.y))
+            
+            # Apply forces
+            p.vy += self.gravity * p.mass * dt * 60
+            p.vx += self.wind * dt * 10
+            
+            # Apply drag
+            drag = 0.99
+            p.vx *= drag
+            p.vy *= drag
+            
+            # Update position
+            p.x += p.vx * dt * 60
+            p.y += p.vy * dt * 60
+            
+            # Update life
+            p.life -= dt
+            
+            # Boundary bouncing
+            if p.x < 0:
+                p.x = 0
+                p.vx *= -0.7
+            elif p.x >= self.width:
+                p.x = self.width - 1
+                p.vx *= -0.7
+                
+            if p.y >= self.height - 1:
+                p.y = self.height - 1
+                p.vy *= -0.6
+                p.vx *= 0.8
+                if abs(p.vy) < 0.5:
+                    p.life = min(p.life, 0.5)
+            
+            # Mark dead particles
+            if p.life <= 0:
+                particles_to_remove.append(p)
+        
+        # Remove dead particles
+        for p in particles_to_remove:
+            self.particles.remove(p)
+    
+    def render(self, screen):
+        """Render particles to screen"""
+        # Create buffer
+        buffer = [[' ' for _ in range(self.width)] for _ in range(self.height)]
+        color_buffer = [[0 for _ in range(self.width)] for _ in range(self.height)]
+        
+        # Draw particles
+        for p in self.particles:
+            x, y = int(p.x), int(p.y)
+            
+            # Draw trail
+            if len(p.trail) > 1:
+                for i, (tx, ty) in enumerate(list(p.trail)[:-1]):
+                    tx, ty = int(tx), int(ty)
+                    if 0 <= tx < self.width and 0 <= ty < self.height:
+                        alpha = i / len(p.trail)
+                        if buffer[ty][tx] == ' ':
+                            buffer[ty][tx] = '·' if alpha > 0.5 else '.'
+                            color_buffer[ty][tx] = p.color
+            
+            # Draw particle
+            if 0 <= x < self.width and 0 <= y < self.height:
+                # Brightness based on life
+                life_ratio = p.life / p.max_life
+                if life_ratio > 0.7:
+                    char = p.char
+                elif life_ratio > 0.4:
+                    char = '.' if p.char in ['*', '✦', '✧'] else p.char
+                else:
+                    char = '.'
+                
+                buffer[y][x] = char
+                color_buffer[y][x] = p.color
+        
+        # Render to screen
+        for y in range(min(self.height, curses.LINES - 1)):
+            for x in range(min(self.width, curses.COLS)):
+                char = buffer[y][x]
+                color = color_buffer[y][x]
+                
+                if char != ' ':
+                    try:
+                        screen.addstr(y, x, char, curses.color_pair(color + 1))
+                    except curses.error:
+                        pass
+
+def main(stdscr):
+    # Setup
+    curses.curs_set(0)  # Hide cursor
+    stdscr.nodelay(1)   # Non-blocking input
+    stdscr.timeout(0)
+    
+    # Initialize colors
+    curses.start_color()
+    curses.use_default_colors()
+    
+    # Setup color pairs
+    colors = [
+        curses.COLOR_BLACK,
+        curses.COLOR_RED,
+        curses.COLOR_GREEN,
+        curses.COLOR_YELLOW,
+        curses.COLOR_BLUE,
+        curses.COLOR_MAGENTA,
+        curses.COLOR_CYAN,
+        curses.COLOR_WHITE
     ]
     
-    y_offset = 10
-    for instruction in instructions:
-        text = font.render(instruction, 1, WHITE)
-        win.blit(text, (10, y_offset))
-        y_offset += 20
+    for i, color in enumerate(colors):
+        curses.init_pair(i + 1, color, -1)
     
-    # Status
-    status_text = f"{'PAUSED' if paused else 'RUNNING'} | Speed: {speed_multiplier}x | Zoom: {zoom:.1f}x"
-    text = font.render(status_text, 1, YELLOW)
-    win.blit(text, (WIDTH - text.get_width() - 10, 10))
+    # Get screen dimensions
+    height, width = stdscr.getmaxyx()
     
-    # Planet info
-    if show_info:
-        info_y = HEIGHT - 200
-        info_bg = pygame.Surface((300, 180))
-        info_bg.set_alpha(200)
-        info_bg.fill((20, 20, 40))
-        win.blit(info_bg, (WIDTH - 310, info_y))
-        
-        title = font.render("Planet Distances (AU):", 1, YELLOW)
-        win.blit(title, (WIDTH - 300, info_y + 10))
-        
-        y = info_y + 35
-        for body in bodies:
-            if not body.sun and body.distance_to_sun > 0:
-                dist_au = body.distance_to_sun / AU
-                text = font.render(f"{body.name}: {dist_au:.2f} AU", 1, body.color)
-                win.blit(text, (WIDTH - 290, y))
-                y += 20
-
-def main():
-    win = pygame.display.set_mode((WIDTH, HEIGHT))
-    pygame.display.set_caption("Solar System Simulator")
-    clock = pygame.time.Clock()
+    # Create particle system
+    ps = ParticleSystem(width, height - 3)
     
-    # Create starfield
-    stars = create_starfield(200)
-    
-    # Create celestial bodies
-    sun = CelestialBody(0, 0, 30, YELLOW, 1.98892 * 10**30, "Sun")
-    sun.sun = True
-    
-    mercury = CelestialBody(0.387 * AU, 0, 4, DARK_GREY, 3.30 * 10**23, "Mercury")
-    mercury.y_vel = -47.4 * 1000
-    
-    venus = CelestialBody(0.723 * AU, 0, 7, PALE_YELLOW, 4.8685 * 10**24, "Venus")
-    venus.y_vel = -35.02 * 1000
-    
-    earth = CelestialBody(-1 * AU, 0, 8, BLUE, 5.9742 * 10**24, "Earth")
-    earth.y_vel = 29.783 * 1000
-    
-    mars = CelestialBody(-1.524 * AU, 0, 6, RED, 6.39 * 10**23, "Mars")
-    mars.y_vel = 24.077 * 1000
-    
-    jupiter = CelestialBody(5.204 * AU, 0, 18, ORANGE, 1.898 * 10**27, "Jupiter")
-    jupiter.y_vel = -13.06 * 1000
-    
-    saturn = CelestialBody(9.583 * AU, 0, 16, PALE_YELLOW, 5.683 * 10**26, "Saturn")
-    saturn.y_vel = -9.68 * 1000
-    
-    uranus = CelestialBody(-19.191 * AU, 0, 12, LIGHT_BLUE, 8.681 * 10**25, "Uranus")
-    uranus.y_vel = 6.80 * 1000
-    
-    neptune = CelestialBody(-30.07 * AU, 0, 12, PALE_BLUE, 1.024 * 10**26, "Neptune")
-    neptune.y_vel = 5.43 * 1000
-    
-    bodies = [sun, mercury, venus, earth, mars, jupiter, saturn, uranus, neptune]
-    
-    # Camera controls
-    offset_x = 0
-    offset_y = 0
-    zoom = 1.0
-    pan_speed = 10
-    
-    # Simulation controls
-    paused = False
-    speed_multiplier = 1
-    show_info = True
+    # Game loop
+    last_time = time.time()
     frame_count = 0
+    fps = 0
     
-    run = True
-    while run:
-        clock.tick(FPS)
+    # Welcome message
+    instructions = [
+        "╔═══════════════════════════════════════════════════════════╗",
+        "║  ASCII PARTICLE PHYSICS SIMULATOR                        ║",
+        "║  Press 1-7 to spawn different effects:                   ║",
+        "║  [1] Firework  [2] Fountain  [3] Explosion  [4] Rain     ║",
+        "║  [5] Spiral    [6] Wave      [7] Galaxy     [Q] Quit     ║",
+        "╚═══════════════════════════════════════════════════════════╝"
+    ]
+    
+    # Spawn initial effect
+    ps.spawn_firework(width // 2, height // 2)
+    
+    while True:
+        current_time = time.time()
+        dt = current_time - last_time
+        last_time = current_time
+        
+        # Calculate FPS
         frame_count += 1
+        if frame_count % 30 == 0:
+            fps = int(1 / dt) if dt > 0 else 0
         
-        for event in pygame.event.get():
-            if event.type == pygame.QUIT:
-                run = False
+        # Handle input
+        try:
+            key = stdscr.getkey()
             
-            if event.type == pygame.KEYDOWN:
-                if event.key == pygame.K_SPACE:
-                    paused = not paused
-                elif event.key == pygame.K_EQUALS or event.key == pygame.K_PLUS:
-                    zoom = min(3.0, zoom + 0.1)
-                elif event.key == pygame.K_MINUS:
-                    zoom = max(0.3, zoom - 0.1)
-                elif event.key == pygame.K_UP:
-                    speed_multiplier = min(10, speed_multiplier + 1)
-                elif event.key == pygame.K_DOWN:
-                    speed_multiplier = max(1, speed_multiplier - 1)
-                elif event.key == pygame.K_i:
-                    show_info = not show_info
-                elif event.key == pygame.K_r:
-                    offset_x = 0
-                    offset_y = 0
-                    zoom = 1.0
+            if key.lower() == 'q':
+                break
+            elif key in ps.effects:
+                # Spawn at random position
+                x = random.randint(width // 4, 3 * width // 4)
+                y = random.randint(height // 4, 3 * height // 4)
+                ps.effects[key](x, y)
+        except:
+            pass
         
-        # Handle continuous key presses for panning
-        keys = pygame.key.get_pressed()
-        if keys[pygame.K_LEFT]:
-            offset_x += pan_speed
-        if keys[pygame.K_RIGHT]:
-            offset_x -= pan_speed
-        # Removed vertical panning to avoid conflict with speed controls
+        # Auto-spawn effects occasionally
+        if random.random() < 0.01:
+            effect = random.choice(list(ps.effects.values()))
+            x = random.randint(width // 4, 3 * width // 4)
+            y = random.randint(height // 4, 3 * height // 4)
+            effect(x, y)
         
-        win.fill(BLACK)
+        # Update
+        ps.update(dt)
         
-        # Draw starfield
-        draw_starfield(win, stars, frame_count)
-        
-        # Update and draw bodies
-        for body in bodies:
-            if not paused:
-                for _ in range(speed_multiplier):
-                    body.update_position(bodies)
-            body.draw(win, offset_x, offset_y, zoom)
+        # Render
+        stdscr.clear()
+        ps.render(stdscr)
         
         # Draw UI
-        draw_ui(win, bodies, paused, speed_multiplier, zoom, show_info)
+        try:
+            for i, line in enumerate(instructions):
+                if i < height - 1:
+                    stdscr.addstr(height - len(instructions) + i - 1, 
+                                max(0, (width - len(line)) // 2), 
+                                line[:width], 
+                                curses.color_pair(7))
+            
+            # Stats
+            stats = f" Particles: {len(ps.particles)} | FPS: {fps} | Wind: {ps.wind:.1f} "
+            stdscr.addstr(0, 0, stats, curses.color_pair(6))
+        except curses.error:
+            pass
         
-        pygame.display.update()
-    
-    pygame.quit()
+        stdscr.refresh()
+        
+        # Frame rate limiting
+        time.sleep(0.016)  # ~60 FPS
 
 if __name__ == "__main__":
-    main()
+    try:
+        curses.wrapper(main)
+    except KeyboardInterrupt:
+        print("\nParticle simulator closed. Thanks for playing!")
+    except Exception as e:
+        print(f"\nError: {e}")
+        print("Make sure your terminal supports color and is large enough!")
