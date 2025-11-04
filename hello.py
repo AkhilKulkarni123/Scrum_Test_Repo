@@ -12,6 +12,8 @@ import pygame.freetype
 import pygame.surfarray
 import pygame.pixelarray
 import pygame.time
+import pygame.locals
+
 import numpy as np
 import ctypes
 import math
