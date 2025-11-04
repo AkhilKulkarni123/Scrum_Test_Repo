@@ -16,6 +16,7 @@ import pygame.locals
 import pygame.event
 import pygame.key
 import pygame.mouse
+import pygame.display
 import numpy as np
 import ctypes
 import math
