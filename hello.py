@@ -10,6 +10,7 @@ import pygame
 import pygame.gfxdraw
 import pygame.freetype
 import numpy as np
+import ctypes
 import math
 import random
 from dataclasses import dataclass
