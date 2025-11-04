@@ -5,6 +5,7 @@ Requirements: pip install pygame numpy
 """
 import sys
 import time
+import os
 import pygame
 import numpy as np
 import math
