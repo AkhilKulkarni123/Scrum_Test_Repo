@@ -3,7 +3,7 @@ Interactive Particle-Based Fluid Simulation with SPH (Smoothed Particle Hydrodyn
 Features: Real-time physics, color gradients, interactive spawning, gravity control
 Requirements: pip install pygame numpy
 """
-
+import python_http_client
 import pygame
 import numpy as np
 import math
