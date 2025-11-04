@@ -10,6 +10,7 @@ import pygame
 import pygame.gfxdraw
 import pygame.freetype
 import pygame.surfarray
+import pygame.pixelarray
 import numpy as np
 import ctypes
 import math
