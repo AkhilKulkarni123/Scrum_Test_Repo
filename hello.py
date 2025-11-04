@@ -7,6 +7,7 @@ import sys
 import time
 import os
 import pygame
+import pygame.gfxdraw
 import numpy as np
 import math
 import random
